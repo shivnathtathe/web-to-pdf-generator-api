@@ -335,7 +335,9 @@ executor = ThreadPoolExecutor(max_workers=3)
 #         browser.close()
 #         print(f"✅ PDF generated successfully: {output}")
 #         return output
-def generate_pdf_sync(format_: str, url: str, output: str, tenant: str):
+
+#perfectly working but saves pdf on server
+def generate_pdf_sync_main(format_: str, url: str, output: str, tenant: str):
     """Synchronous version of generate_pdf using sync_playwright"""
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -408,6 +410,116 @@ def generate_pdf_sync(format_: str, url: str, output: str, tenant: str):
             
         return output
 
+
+def generate_pdf_sync(format_: str, url: str, tenant: str):
+    """Synchronous version of generate_pdf using sync_playwright - returns PDF bytes"""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        )
+        page = browser.new_page()
+        
+        print(f"📄 Loading URL: {url}")
+        
+        try:
+            # Navigate and wait
+            page.goto(url, wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(2000)
+            
+            # Check if page has content
+            content = page.content()
+            print(f"📝 Page content length: {len(content)} characters")
+            
+            if len(content) < 100:
+                print("⚠️ Warning: Page content seems too short!")
+            
+            # Wait for fonts
+            page.evaluate("() => document.fonts.ready")
+            page.wait_for_timeout(1000)
+            
+            print(f"✅ Page loaded successfully")
+            
+            # Add custom styles
+            page.add_style_tag(content="""
+                html, body {
+                    margin: 0 !important;
+                    padding: 0 !important;
+                }
+                .pagebreakbefore {
+                    break-before: page;
+                    page-break-before: always;
+                }
+                @page :first {
+                    margin-top: 0 !important;
+                }
+            """)
+
+            # Get tenant-specific config
+            tenant_config = PDF_CONFIG.get(tenant, PDF_CONFIG["default"])
+            config = tenant_config.get(format_, tenant_config.get("A4"))
+
+            if not config:
+                browser.close()
+                raise HTTPException(status_code=400, detail=f"No config found for {format_}")
+
+            print(f"📋 PDF Config: format={format_}, margin={config['margin']}")
+            
+            # Generate PDF and return bytes instead of saving to file
+            pdf_bytes = page.pdf(
+                format=format_,
+                print_background=True,
+                margin=config["margin"],
+                prefer_css_page_size=True
+            )
+
+            print(f"✅ PDF generated successfully")
+            
+        except Exception as e:
+            print(f"❌ Error during PDF generation: {str(e)}")
+            raise
+        finally:
+            browser.close()
+            
+        return pdf_bytes
+    
+# @app.get("/generate-pdf-main") #this is the main
+# async def generate_pdf_api_main(
+#     url: str = Query(..., description="URL of the HTML page"),
+#     tenant: str = Query("default", description="Tenant name (multi-tenant configs)")
+# ):
+#     """
+#     Converts a given HTML page to PDF.
+#     Auto-detects format from URL like '::A4' or '::A5'.
+#     Uses config.json for margins (multi-tenant).
+#     """
+#     match = re.search(r"::(A\d+)", url)
+#     if not match:
+#         raise HTTPException(status_code=400, detail="Format (A4, A5, etc.) not found in URL")
+
+#     format_ = match.group(1)
+#     output_filename = f"{tenant}_{format_}.pdf"
+    
+#     print(f"🚀 Starting PDF generation: format={format_}, tenant={tenant}")
+    
+#     try:
+#         # Run sync playwright in thread pool
+#         loop = asyncio.get_event_loop()
+#         pdf_path = await loop.run_in_executor(
+#             executor, 
+#             generate_pdf_sync, 
+#             format_, 
+#             url, 
+#             output_filename, 
+#             tenant
+#         )
+        
+#         return FileResponse(pdf_path, filename=output_filename, media_type="application/pdf")
+    
+#     except Exception as e:
+#         print(f"❌ Error: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+
 @app.get("/generate-pdf")
 async def generate_pdf_api(
     url: str = Query(..., description="URL of the HTML page"),
@@ -430,22 +542,26 @@ async def generate_pdf_api(
     try:
         # Run sync playwright in thread pool
         loop = asyncio.get_event_loop()
-        pdf_path = await loop.run_in_executor(
+        pdf_bytes = await loop.run_in_executor(
             executor, 
             generate_pdf_sync, 
             format_, 
             url, 
-            output_filename, 
             tenant
         )
         
-        return FileResponse(pdf_path, filename=output_filename, media_type="application/pdf")
+        from fastapi.responses import Response
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{output_filename}"'
+            }
+        )
     
     except Exception as e:
         print(f"❌ Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
-
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
