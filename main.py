@@ -562,6 +562,17 @@ async def generate_pdf_api(
     except Exception as e:
         print(f"❌ Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+
+
+@app.get("/health")
+async def health():
+    """Detailed health check"""
+    return {
+        "status": "ok",
+        "service": "web-to-pdf-generator",
+        "uptime": "running"
+    }
+    
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
